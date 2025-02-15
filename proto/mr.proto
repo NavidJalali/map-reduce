@@ -1,0 +1,51 @@
+// Map Reduce Protos
+syntax = "proto3";
+package io.reverie.mapreduce;
+
+import "google/protobuf/timestamp.proto";
+
+service Master {
+  // Service discovery
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse) {}
+
+  // Heartbeats
+  rpc SendHeartbeat(SendHeartbeatRequest) returns (SendHeartbeatResponse) {}
+
+  // Task management
+  rpc GetTask(GetTaskRequest) returns (GetTaskResponse) {}
+  rpc ReportTaskCompletion(ReportTaskCompletionRequest) returns (ReportTaskCompletionResponse) {}
+
+  // Debug
+  rpc Debug(DebugRequest) returns (DebugResponse) {}
+}
+
+// Service discovery
+message RegisterWorkerRequest {}
+message RegisterWorkerResponse {}
+
+// Heartbeats
+message SendHeartbeatRequest {}
+message SendHeartbeatResponse {}
+
+// Task management
+message GetTaskRequest {}
+message GetTaskResponse {}
+
+message ReportTaskCompletionRequest {}
+message ReportTaskCompletionResponse {}
+
+message DebugRequest {}
+message DebugResponse {
+  message Worker {
+    string address = 1;
+    google.protobuf.Timestamp last_heartbeat = 2;
+  }
+
+  message AwaitingWorkers {
+    map<string, Worker> workers = 1;
+  }
+
+  oneof state {
+    AwaitingWorkers awaiting_workers = 1;
+  }
+}

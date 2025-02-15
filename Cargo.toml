@@ -1,0 +1,9 @@
+[workspace]
+members = [
+  "map-reduce-core",
+  "map-reduce-master",
+  "map-reduce-worker",
+  "chunkify",
+]
+
+resolver = "2"
