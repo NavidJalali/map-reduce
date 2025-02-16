@@ -17,8 +17,6 @@ fn chunkify() -> io::Result<usize> {
     let fstat = fs::metadata(&path)?;
     println!("Chunkifying file: {:?}", fstat);
 
-    // Every chunk should be 1000 lines long max
-
     let file = fs::File::open(path)?;
     let reader = io::BufReader::new(file);
     let mut lines = reader.lines();
@@ -73,7 +71,6 @@ fn replicate(chunks: usize, worker_count: usize, replication_factor: usize) {
 
     (0..=chunks).for_each(|chunk| {
         let workers = if replication_factor == 1 {
-            // only write to primary
             vec![chunk % worker_count]
         } else {
             let mut workers = Vec::with_capacity(replication_factor);
