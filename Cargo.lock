@@ -519,6 +519,8 @@ dependencies = [
  "prost-types",
  "tokio",
  "tonic",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

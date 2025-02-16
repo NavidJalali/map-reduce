@@ -100,6 +100,17 @@ impl Master for MasterImpl {
             request,
             request.remote_addr()
         );
+        let address = Address(request.remote_addr().unwrap());
+        let mut state = self.state.write().await;
+
+        match &mut *state {
+            State::AwaitingWorkers { workers } => {
+                if let Some(info) = workers.get_mut(&address) {
+                    info.last_heartbeat = SystemTime::now();
+                }
+            }
+        }
+
         Ok(Response::new(grpc::SendHeartbeatResponse {}))
     }
 
