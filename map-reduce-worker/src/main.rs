@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = WorkerConfig {
         master_address: Address("0.0.0.0:50051".parse()?),
         heartbeat_interval: Duration::from_secs(1).into(),
-        input_directory: std::env::var("INPUT_DIRECTORY").unwrap_or_else(|_| "input".to_string()),
+        input_directory: std::env::var("INPUT_DIRECTORY").expect("INPUT_DIRECTORY not set"),
     };
 
     let worker = WorkerImpl::new(config).await?;
