@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf, sync::Arc, vec};
 
 use tokio::{
     sync::Mutex,
@@ -17,6 +17,34 @@ pub struct WorkerConfig {
     pub master_address: Address,
     pub heartbeat_interval: Duration,
     pub input_directory: String,
+}
+
+impl WorkerConfig {
+    pub async fn list_files_in_directory(&self) -> Result<Vec<(usize, PathBuf)>, std::io::Error> {
+        let mut read_dir = tokio::fs::read_dir(&self.input_directory).await?;
+
+        let mut files = vec![];
+
+        while let Some(entry) = read_dir.next_entry().await? {
+            if entry.file_type().await?.is_file() {
+                let name = entry.file_name();
+                // name should be in the format "chunk-<number>.txt"
+                let name = name.to_str().unwrap();
+                let chunk_number = name
+                    .split('-')
+                    .nth(1)
+                    .iter()
+                    .flat_map(|s| s.split('.').next())
+                    .flat_map(|s| s.parse::<usize>().ok())
+                    .next()
+                    .expect("Invalid chunk file name");
+
+                files.push((chunk_number, entry.path()));
+            }
+        }
+
+        Ok(files)
+    }
 }
 
 struct WorkerImpl {
@@ -43,8 +71,7 @@ impl WorkerImpl {
         drop(guard);
 
         // List all files in the input directory
-        let files = tokio::fs::read_dir(&config.input_directory).await?;
-
+        let files = config.list_files_in_directory().await?;
         println!("Files in input directory: {:?}", files);
 
         // Start the heartbeat loop
