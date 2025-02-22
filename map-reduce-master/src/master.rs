@@ -2,10 +2,7 @@ use crate::{
     config::MasterConfig,
     state::{InputFileChunk, State, WorkerInfo},
 };
-use map_reduce_core::{
-    grpc::{debug_response::AwaitingWorkers, master_server::Master},
-    *,
-};
+use map_reduce_core::{grpc::master_server::Master, *};
 use std::ops::Sub;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections::HashMap, sync::Arc};
