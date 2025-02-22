@@ -1,11 +1,17 @@
-use std::{collections::HashMap, time::SystemTime};
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 use map_reduce_core::Address;
 
 #[derive(Debug, Clone, Copy)]
+pub struct InputFileChunk {
+    pub id: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct WorkerInfo {
     pub last_heartbeat: SystemTime,
     pub address: Address,
+    pub locally_stored_chunks: Arc<[InputFileChunk]>,
 }
 
 #[derive(Debug)]

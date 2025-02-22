@@ -85,6 +85,11 @@ fn replicate(chunks: usize, worker_count: usize, replication_factor: usize) {
 
         let source = chunks_path.join(file_name.clone());
 
+        // All chunks will be written to the dfs directory
+        let dfs_path = destination_path.join("dfs").join(file_name.clone());
+        fs::create_dir_all(dfs_path.parent().unwrap()).unwrap();
+        fs::copy(source.clone(), dfs_path).unwrap();
+
         for worker in workers {
             let dest = destination_path
                 .join(format!("worker-{}", worker))

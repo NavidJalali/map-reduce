@@ -1,6 +1,6 @@
 use crate::state::WorkerInfo;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TaskState {
     Idle,
     InProgress { worker: WorkerInfo },

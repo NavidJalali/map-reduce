@@ -20,7 +20,10 @@ service Master {
 }
 
 // Service discovery
-message RegisterWorkerRequest {}
+message RegisterWorkerRequest {
+  repeated uint32 locally_stored_chunks = 1;
+}
+
 message RegisterWorkerResponse {}
 
 // Heartbeats
@@ -34,11 +37,14 @@ message GetTaskResponse {}
 message ReportTaskCompletionRequest {}
 message ReportTaskCompletionResponse {}
 
+
+
 message DebugRequest {}
 message DebugResponse {
   message Worker {
     string address = 1;
     google.protobuf.Timestamp last_heartbeat = 2;
+    repeated uint32 locally_stored_chunks = 3;
   }
 
   message AwaitingWorkers {

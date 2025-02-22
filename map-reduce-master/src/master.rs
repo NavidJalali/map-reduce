@@ -1,6 +1,6 @@
 use crate::{
     config::MasterConfig,
-    state::{State, WorkerInfo},
+    state::{InputFileChunk, State, WorkerInfo},
 };
 use map_reduce_core::{
     grpc::{debug_response::AwaitingWorkers, master_server::Master},
@@ -67,9 +67,21 @@ impl Master for MasterImpl {
             request.remote_addr()
         );
         let address = Address(request.remote_addr().unwrap());
+        let locally_stored_chunks = request
+            .into_inner()
+            .locally_stored_chunks
+            .iter()
+            .map(|&id| InputFileChunk { id })
+            .collect::<Vec<_>>();
+
+        let locally_stored_chunks = locally_stored_chunks.as_slice();
+
+        let locally_stored_chunks = Arc::from(locally_stored_chunks);
+
         let info = WorkerInfo {
             address: address,
             last_heartbeat: SystemTime::now(),
+            locally_stored_chunks: locally_stored_chunks,
         };
 
         let mut state = self.state.write().await;
@@ -167,6 +179,11 @@ impl Master for MasterImpl {
                                         seconds: duration.as_secs() as i64,
                                         nanos: duration.subsec_nanos() as i32,
                                     }),
+                                    locally_stored_chunks: info
+                                        .locally_stored_chunks
+                                        .iter()
+                                        .map(|chunk| chunk.id)
+                                        .collect::<Vec<_>>(),
                                 },
                             )
                         })

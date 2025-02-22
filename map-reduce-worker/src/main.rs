@@ -61,18 +61,20 @@ impl WorkerImpl {
 
         let heartbeat_client = client.clone();
 
+        // List all files in the input directory
+        let files = config.list_files_in_directory().await?;
+        println!("Files in input directory: {:?}", files);
+
         // Register with the master
         let mut guard = heartbeat_client.lock().await;
 
         guard
-            .register_worker(tonic::Request::new(grpc::RegisterWorkerRequest {}))
+            .register_worker(tonic::Request::new(grpc::RegisterWorkerRequest {
+                locally_stored_chunks: files.iter().map(|(id, _)| *id as u32).collect(),
+            }))
             .await?;
 
         drop(guard);
-
-        // List all files in the input directory
-        let files = config.list_files_in_directory().await?;
-        println!("Files in input directory: {:?}", files);
 
         // Start the heartbeat loop
         tokio::spawn(async move {
