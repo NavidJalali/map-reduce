@@ -3,6 +3,7 @@ syntax = "proto3";
 package io.reverie.mapreduce;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
 
 service Master {
   // Service discovery
@@ -32,7 +33,43 @@ message SendHeartbeatResponse {}
 
 // Task management
 message GetTaskRequest {}
-message GetTaskResponse {}
+message GetTaskResponse {
+  // Response indicates that worker should shut down and exit.
+  message Shutdown {
+    message Done {}
+    message Error {
+      string message = 1;
+    }
+
+    oneof reason {
+      Done done = 1;
+      Error error = 2;
+    }
+  }
+
+  // Response indicates that worker should ask again after specified duration.
+  message Backoff {
+    google.protobuf.Duration duration = 1;
+  }
+
+  // Response indicates that worker should start a new task.
+  message Task {
+    message Map {}
+
+    message Reduce {}
+
+    oneof task {
+      Map map = 1;
+      Reduce reduce = 2;
+    }
+  }
+
+  oneof instruction {
+    Shutdown shutdown = 1;
+    Backoff backoff = 2;
+    Task task = 3;
+  }
+}
 
 message ReportTaskCompletionRequest {}
 message ReportTaskCompletionResponse {}

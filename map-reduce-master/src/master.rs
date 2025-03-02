@@ -1,6 +1,8 @@
 use crate::{
     config::MasterConfig,
-    state::{InputFileChunk, State, WorkerInfo},
+    dfs::DFS,
+    input_file_chunk::InputFileChunk,
+    state::{State, WorkerInfo},
 };
 use map_reduce_core::{grpc::master_server::Master, *};
 use std::ops::Sub;
@@ -11,15 +13,22 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 #[derive(Debug)]
-pub struct MasterImpl {
+pub struct MasterImpl<FileSystem> {
     config: MasterConfig,
     state: Arc<RwLock<State>>,
+    file_system: FileSystem,
 }
 
-impl MasterImpl {
-    pub fn new(config: MasterConfig) -> Self {
+impl<FileSystem: DFS> MasterImpl<FileSystem> {
+    pub async fn new(config: MasterConfig, file_system: FileSystem) -> Self {
+        let chunks = file_system
+            .get_chunks()
+            .await
+            .expect("Failed to get chunks");
+
         let state = Arc::new(RwLock::new(State::AwaitingWorkers {
             workers: HashMap::new(),
+            files: chunks,
         }));
 
         let moved_state = state.clone();
@@ -29,7 +38,7 @@ impl MasterImpl {
                 tokio::time::sleep(config.cleanup_interval).await;
                 let mut state = moved_state.write().await;
                 match &mut *state {
-                    State::AwaitingWorkers { workers } => {
+                    State::AwaitingWorkers { workers, .. } => {
                         let last_allowed_hearbeat =
                             SystemTime::now().sub(config.max_heartbeat_delay);
 
@@ -46,14 +55,15 @@ impl MasterImpl {
         });
 
         Self {
-            config: config,
-            state: state,
+            config,
+            state,
+            file_system,
         }
     }
 }
 
 #[tonic::async_trait]
-impl Master for MasterImpl {
+impl<FileSystem: DFS + Send + Sync + 'static> Master for MasterImpl<FileSystem> {
     async fn register_worker(
         &self,
         request: Request<grpc::RegisterWorkerRequest>,
@@ -86,7 +96,7 @@ impl Master for MasterImpl {
         info!("Current state: {:?}", state);
 
         match &mut *state {
-            State::AwaitingWorkers { workers } => {
+            State::AwaitingWorkers { workers, .. } => {
                 workers.insert(address, info);
                 if workers.len() == self.config.num_workers {
                     // Transition to the next state
@@ -113,7 +123,7 @@ impl Master for MasterImpl {
         let mut state = self.state.write().await;
 
         match &mut *state {
-            State::AwaitingWorkers { workers } => {
+            State::AwaitingWorkers { workers, .. } => {
                 if let Some(info) = workers.get_mut(&address) {
                     info.last_heartbeat = SystemTime::now();
                 }
@@ -132,7 +142,16 @@ impl Master for MasterImpl {
             request,
             request.remote_addr()
         );
-        Ok(Response::new(grpc::GetTaskResponse {}))
+        Ok(Response::new(grpc::GetTaskResponse {
+            instruction: Some(grpc::get_task_response::Instruction::Backoff(
+                grpc::get_task_response::Backoff {
+                    duration: Some(prost_types::Duration {
+                        seconds: 10,
+                        nanos: 0,
+                    }),
+                },
+            )),
+        }))
     }
 
     async fn report_task_completion(
@@ -159,7 +178,7 @@ impl Master for MasterImpl {
         let state = self.state.read().await;
 
         let proto_state = match &*state {
-            State::AwaitingWorkers { workers } => grpc::debug_response::State::AwaitingWorkers(
+            State::AwaitingWorkers { workers, .. } => grpc::debug_response::State::AwaitingWorkers(
                 grpc::debug_response::AwaitingWorkers {
                     workers: workers
                         .iter()

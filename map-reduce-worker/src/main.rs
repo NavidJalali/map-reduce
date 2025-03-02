@@ -1,5 +1,10 @@
-use std::{path::PathBuf, sync::Arc, vec};
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    vec,
+};
 
+use shutdown_signal::ShutdownSignal;
 use tokio::{
     sync::Mutex,
     time::{sleep, Duration},
@@ -12,11 +17,14 @@ use map_reduce_core::{
 use tonic::transport::{Channel, Endpoint};
 use tracing::{error, info};
 
+mod shutdown_signal;
+
 #[derive(Debug)]
 pub struct WorkerConfig {
     pub master_address: Address,
     pub heartbeat_interval: Duration,
     pub input_directory: String,
+    pub max_error_tolerance: usize,
 }
 
 impl WorkerConfig {
@@ -48,36 +56,53 @@ impl WorkerConfig {
 }
 
 struct WorkerImpl {
-    pub client: Arc<Mutex<MasterClient<Channel>>>,
+    client: Arc<Mutex<MasterClient<Channel>>>,
+    config: WorkerConfig,
+    shutdown: tokio::sync::oneshot::Receiver<ShutdownReason>,
+    accumulated_errors: Arc<RwLock<AccumulatedErrors>>,
+}
+
+#[derive(Debug, Clone)]
+struct AccumulatedErrors {
+    heartbeat: Vec<tonic::Status>,
+}
+
+#[derive(Debug)]
+enum ShutdownReason {
+    Done,
+    WorkerError(AccumulatedErrors),
 }
 
 impl WorkerImpl {
     pub async fn new(config: WorkerConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let url = format!("http://{}", config.master_address.0);
-        let endpoint = Endpoint::from_shared(url)?.tcp_nodelay(true);
-        let client = Arc::new(Mutex::new(MasterClient::connect(endpoint).await?));
 
-        println!("Starting worker with config: {:?}", config);
+        let client = Arc::new(Mutex::new(
+            MasterClient::connect(Endpoint::from_shared(url)?.tcp_nodelay(true)).await?,
+        ));
+
+        let accumulated_errors = Arc::new(RwLock::new(AccumulatedErrors { heartbeat: vec![] }));
+
+        info!("Starting worker with config: {:?}", config);
 
         let heartbeat_client = client.clone();
-
-        // List all files in the input directory
         let files = config.list_files_in_directory().await?;
-        println!("Files in input directory: {:?}", files);
+
+        let (shutdown, shutdown_receiver) = ShutdownSignal::new();
 
         // Register with the master
-        let mut guard = heartbeat_client.lock().await;
-
-        guard
+        heartbeat_client
+            .lock()
+            .await
             .register_worker(tonic::Request::new(grpc::RegisterWorkerRequest {
                 locally_stored_chunks: files.iter().map(|(id, _)| *id as u32).collect(),
             }))
             .await?;
 
-        drop(guard);
-
         // Start the heartbeat loop
-        tokio::spawn(async move {
+        let heartbeat_shutdown = shutdown.clone();
+        let heartbeat_errors = accumulated_errors.clone();
+        let heartbeat_fiber = tokio::spawn(async move {
             loop {
                 sleep(config.heartbeat_interval).await;
                 let result = heartbeat_client
@@ -87,13 +112,93 @@ impl WorkerImpl {
                     .await;
 
                 match result {
-                    Ok(_) => info!("Successfully sent heartbeat"),
-                    Err(e) => error!("Failed to send heartbeat: {:?}", e),
+                    Ok(_) => {
+                        info!("Successfully sent heartbeat");
+                        let mut err = heartbeat_errors
+                            .write()
+                            .expect("Failed to acquire lock for errors");
+
+                        err.heartbeat.clear();
+                    }
+                    Err(e) => {
+                        error!("Failed to send heartbeat: {:?}", e);
+
+                        let should_shutdown = {
+                            let mut err = heartbeat_errors
+                                .write()
+                                .expect("Failed to acquire lock for errors");
+
+                            err.heartbeat.push(e);
+
+                            // Check condition and clone errors inside the scope
+                            if err.heartbeat.len() > config.max_error_tolerance {
+                                Some(err.clone())
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some(errors) = should_shutdown {
+                            error!("Reached max error tolerance, shutting down");
+
+                            let die_now = heartbeat_shutdown.clone();
+                            tokio::spawn(async move {
+                                die_now.trigger(ShutdownReason::WorkerError(errors)).await;
+                            });
+
+                            break;
+                        }
+                    }
                 }
             }
         });
 
-        Ok(WorkerImpl { client })
+        shutdown
+            .register_shutdown_task(
+                || {
+                    Box::pin(async {
+                        heartbeat_fiber.abort();
+                        info!("Aborted heartbeat fiber");
+                        let exit = heartbeat_fiber.await;
+                        info!("heartbeat exited: {:?}", exit);
+                    })
+                },
+                "heartbeat".to_string(),
+            )
+            .await;
+
+        let task_client = client.clone();
+        let task_pull_fiber = tokio::spawn(async move {
+            loop {
+                //  let foo = task_client.lock().await.get_task(tonic::Request::new(grpc::GetTaskRequest {})).await;
+                sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        shutdown
+            .register_shutdown_task(
+                || {
+                    Box::pin(async {
+                        task_pull_fiber.abort();
+                        info!("Aborted task puller fiber");
+                        let exit = task_pull_fiber.await;
+                        info!("task puller exited: {:?}", exit);
+                    })
+                },
+                "task puller".to_string(),
+            )
+            .await;
+
+        Ok(WorkerImpl {
+            client,
+            config,
+            shutdown: shutdown_receiver,
+            accumulated_errors,
+        })
+    }
+
+    pub async fn await_shutdown(self) -> ShutdownReason {
+        self.shutdown.await.expect("Failed to await shutdown")
     }
 }
 
@@ -101,8 +206,9 @@ impl WorkerImpl {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = WorkerConfig {
         master_address: Address("0.0.0.0:50051".parse()?),
-        heartbeat_interval: Duration::from_secs(10).into(),
+        heartbeat_interval: Duration::from_secs(3).into(),
         input_directory: std::env::var("INPUT_DIRECTORY").expect("INPUT_DIRECTORY not set"),
+        max_error_tolerance: 3,
     };
 
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
@@ -113,10 +219,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let worker = WorkerImpl::new(config).await?;
 
-    // prevent shut down until input from stdin
+    let shutdown_reason = worker.await_shutdown().await;
 
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
+    info!("Shutting down due to: {:?}", shutdown_reason);
 
     Ok(())
 }

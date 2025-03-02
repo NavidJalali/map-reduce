@@ -1,4 +1,5 @@
 use config::MasterConfig;
+use dfs::DFS;
 use map_reduce_core::grpc;
 use map_reduce_core::*;
 use master::MasterImpl;
@@ -10,6 +11,8 @@ use tracing::info;
 use tracing_subscriber::FmtSubscriber;
 
 mod config;
+mod dfs;
+mod input_file_chunk;
 mod master;
 mod state;
 mod task;
@@ -29,9 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::subscriber::set_global_default(subscriber)?;
 
+    let dfs = dfs::LocalFileSystem::new("input/dfs");
+
     let address = config.address.clone();
 
-    let master = MasterImpl::new(config);
+    let master = MasterImpl::new(config, dfs).await;
 
     info!("Starting master server on {:?}", address);
 
