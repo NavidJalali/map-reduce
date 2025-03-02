@@ -1,12 +1,9 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, RwLock},
-    vec,
-};
+use std::{path::PathBuf, sync::Arc};
 
-use shutdown_signal::ShutdownSignal;
+use error_tracker::ErrorTracker;
+use shutdown_manager::{Shutdown, ShutdownManager};
 use tokio::{
-    sync::Mutex,
+    sync::{Mutex, RwLock},
     time::{sleep, Duration},
 };
 
@@ -15,97 +12,70 @@ use map_reduce_core::{
     Address,
 };
 use tonic::transport::{Channel, Endpoint};
-use tracing::{error, info};
+use tracing::{error, info, warn};
+use worker_config::WorkerConfig;
 
-mod shutdown_signal;
-
-#[derive(Debug)]
-pub struct WorkerConfig {
-    pub master_address: Address,
-    pub heartbeat_interval: Duration,
-    pub input_directory: String,
-    pub max_error_tolerance: usize,
-}
-
-impl WorkerConfig {
-    pub async fn list_files_in_directory(&self) -> Result<Vec<(usize, PathBuf)>, std::io::Error> {
-        let mut read_dir = tokio::fs::read_dir(&self.input_directory).await?;
-
-        let mut files = vec![];
-
-        while let Some(entry) = read_dir.next_entry().await? {
-            if entry.file_type().await?.is_file() {
-                let name = entry.file_name();
-                // name should be in the format "chunk-<number>.txt"
-                let name = name.to_str().unwrap();
-                let chunk_number = name
-                    .split('-')
-                    .nth(1)
-                    .iter()
-                    .flat_map(|s| s.split('.').next())
-                    .flat_map(|s| s.parse::<usize>().ok())
-                    .next()
-                    .expect("Invalid chunk file name");
-
-                files.push((chunk_number, entry.path()));
-            }
-        }
-
-        Ok(files)
-    }
-}
+mod error_tracker;
+mod shutdown_manager;
+mod worker_config;
 
 struct WorkerImpl {
     client: Arc<Mutex<MasterClient<Channel>>>,
     config: WorkerConfig,
-    shutdown: tokio::sync::oneshot::Receiver<ShutdownReason>,
-    accumulated_errors: Arc<RwLock<AccumulatedErrors>>,
-}
-
-#[derive(Debug, Clone)]
-struct AccumulatedErrors {
-    heartbeat: Vec<tonic::Status>,
+    shutdown: ShutdownManager<ShutdownReason>,
+    error_tracker: Arc<RwLock<ErrorTracker>>,
 }
 
 #[derive(Debug)]
 enum ShutdownReason {
     Done,
-    WorkerError(AccumulatedErrors),
+    MasterError(Option<String>),
+    WorkerError(ErrorTracker),
 }
 
 impl WorkerImpl {
-    pub async fn new(config: WorkerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn make_client(
+        config: &WorkerConfig,
+    ) -> Result<MasterClient<Channel>, Box<dyn std::error::Error>> {
         let url = format!("http://{}", config.master_address.0);
+        let client = MasterClient::connect(Endpoint::from_shared(url)?.tcp_nodelay(true)).await?;
+        Ok(client)
+    }
 
-        let client = Arc::new(Mutex::new(
-            MasterClient::connect(Endpoint::from_shared(url)?.tcp_nodelay(true)).await?,
-        ));
+    async fn error_threshold_exceeded(
+        shutdown: Arc<Shutdown<ShutdownReason>>,
+        reason: ShutdownReason,
+    ) {
+        error!("Reached max error tolerance, shutting down");
 
-        let accumulated_errors = Arc::new(RwLock::new(AccumulatedErrors { heartbeat: vec![] }));
+        tokio::spawn(async move {
+            shutdown.trigger(reason).await;
+        });
+    }
 
-        info!("Starting worker with config: {:?}", config);
+    async fn master_signalled_shutdown(
+        shutdown: Arc<Shutdown<ShutdownReason>>,
+        reason: ShutdownReason,
+    ) {
+        error!("Master signalled shutdown, shutting down");
 
-        let heartbeat_client = client.clone();
-        let files = config.list_files_in_directory().await?;
+        tokio::spawn(async move {
+            shutdown.trigger(reason).await;
+        });
+    }
 
-        let (shutdown, shutdown_receiver) = ShutdownSignal::new();
-
-        // Register with the master
-        heartbeat_client
-            .lock()
-            .await
-            .register_worker(tonic::Request::new(grpc::RegisterWorkerRequest {
-                locally_stored_chunks: files.iter().map(|(id, _)| *id as u32).collect(),
-            }))
-            .await?;
-
-        // Start the heartbeat loop
-        let heartbeat_shutdown = shutdown.clone();
-        let heartbeat_errors = accumulated_errors.clone();
-        let heartbeat_fiber = tokio::spawn(async move {
+    async fn start_heartbeat_fiber(
+        client: Arc<Mutex<MasterClient<Channel>>>,
+        heartbeat_interval: Duration,
+        max_error_tolerance: usize,
+        error_tracker: Arc<RwLock<ErrorTracker>>,
+        shutdown: Arc<Shutdown<ShutdownReason>>,
+    ) {
+        let finalizer_shutdown = shutdown.clone();
+        let fiber = tokio::spawn(async move {
             loop {
-                sleep(config.heartbeat_interval).await;
-                let result = heartbeat_client
+                sleep(heartbeat_interval).await;
+                let result = client
                     .lock()
                     .await
                     .send_heartbeat(tonic::Request::new(grpc::SendHeartbeatRequest {}))
@@ -114,24 +84,18 @@ impl WorkerImpl {
                 match result {
                     Ok(_) => {
                         info!("Successfully sent heartbeat");
-                        let mut err = heartbeat_errors
-                            .write()
-                            .expect("Failed to acquire lock for errors");
-
+                        let mut err = error_tracker.write().await;
                         err.heartbeat.clear();
                     }
                     Err(e) => {
                         error!("Failed to send heartbeat: {:?}", e);
 
                         let should_shutdown = {
-                            let mut err = heartbeat_errors
-                                .write()
-                                .expect("Failed to acquire lock for errors");
-
+                            let mut err = error_tracker.write().await;
                             err.heartbeat.push(e);
 
                             // Check condition and clone errors inside the scope
-                            if err.heartbeat.len() > config.max_error_tolerance {
+                            if err.heartbeat.len() > max_error_tolerance {
                                 Some(err.clone())
                             } else {
                                 None
@@ -139,12 +103,11 @@ impl WorkerImpl {
                         };
 
                         if let Some(errors) = should_shutdown {
-                            error!("Reached max error tolerance, shutting down");
-
-                            let die_now = heartbeat_shutdown.clone();
-                            tokio::spawn(async move {
-                                die_now.trigger(ShutdownReason::WorkerError(errors)).await;
-                            });
+                            Self::error_threshold_exceeded(
+                                shutdown.clone(),
+                                ShutdownReason::WorkerError(errors),
+                            )
+                            .await;
 
                             break;
                         }
@@ -153,52 +116,206 @@ impl WorkerImpl {
             }
         });
 
-        shutdown
+        finalizer_shutdown
             .register_shutdown_task(
                 || {
                     Box::pin(async {
-                        heartbeat_fiber.abort();
+                        fiber.abort();
                         info!("Aborted heartbeat fiber");
-                        let exit = heartbeat_fiber.await;
+                        let exit = fiber.await;
                         info!("heartbeat exited: {:?}", exit);
                     })
                 },
                 "heartbeat".to_string(),
             )
             .await;
+    }
 
-        let task_client = client.clone();
-        let task_pull_fiber = tokio::spawn(async move {
+    async fn start_task_puller_fiber(
+        client: Arc<Mutex<MasterClient<Channel>>>,
+        max_error_tolerance: usize,
+        error_tracker: Arc<RwLock<ErrorTracker>>,
+        shutdown: Arc<Shutdown<ShutdownReason>>,
+    ) {
+        let finalizer_shutdown = shutdown.clone();
+        let fiber = tokio::spawn(async move {
             loop {
-                //  let foo = task_client.lock().await.get_task(tonic::Request::new(grpc::GetTaskRequest {})).await;
-                sleep(Duration::from_secs(5)).await;
+                info!("Requesting task from master");
+
+                let task = client
+                    .lock()
+                    .await
+                    .get_task(tonic::Request::new(grpc::GetTaskRequest {}))
+                    .await;
+
+                match task {
+                    Ok(task) => {
+                        let mut err = error_tracker.write().await;
+                        err.task_puller.clear();
+
+                        let task = task.into_inner();
+
+                        info!("Received task from master: {:?}", task);
+                        match task.instruction {
+                            Some(instruction) => {
+                                match instruction {
+                                    grpc::get_task_response::Instruction::Shutdown(
+                                        shutdown_task,
+                                    ) => {
+                                        if let Some(reason) = shutdown_task.reason {
+                                            match reason {
+                                            grpc::get_task_response::shutdown::Reason::Done(done) => {
+                                                Self::master_signalled_shutdown(
+                                                    shutdown.clone(),
+                                                    ShutdownReason::Done,
+                                                )
+                                                .await;
+                                                break;
+                                            }
+                                            grpc::get_task_response::shutdown::Reason::Error(error) => {
+                                                Self::master_signalled_shutdown(
+                                                    shutdown.clone(),
+                                                    ShutdownReason::MasterError(Some(error.message)),
+                                                )
+                                                .await;
+                                                break;
+                                            }
+                                        }
+                                        } else {
+                                            warn!("Received shutdown instruction without reason");
+
+                                            Self::master_signalled_shutdown(
+                                                shutdown.clone(),
+                                                ShutdownReason::MasterError(None),
+                                            )
+                                            .await;
+
+                                            break;
+                                        }
+                                    }
+                                    grpc::get_task_response::Instruction::Backoff(backoff) => {
+                                        if let Some(duration) = backoff.duration {
+                                            let duration = Duration::new(
+                                                duration.seconds as u64,
+                                                duration.nanos as u32,
+                                            );
+
+                                            sleep(duration).await;
+                                        } else {
+                                            warn!("Received backoff instruction without duration");
+                                        }
+                                    }
+                                    grpc::get_task_response::Instruction::Task(task) => {
+                                        unimplemented!()
+                                    }
+                                }
+                            }
+                            None => warn!("Received empty task"),
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to get task: {:?}", e);
+
+                        let should_shutdown = {
+                            let mut err = error_tracker.write().await;
+                            err.task_puller.push(e);
+
+                            // Check condition and clone errors inside the scope
+                            if err.task_puller.len() > max_error_tolerance {
+                                Some(err.clone())
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some(errors) = should_shutdown {
+                            Self::error_threshold_exceeded(
+                                shutdown.clone(),
+                                ShutdownReason::WorkerError(errors),
+                            )
+                            .await;
+
+                            break;
+                        }
+                    }
+                }
             }
         });
 
-        shutdown
+        finalizer_shutdown
             .register_shutdown_task(
                 || {
                     Box::pin(async {
-                        task_pull_fiber.abort();
+                        fiber.abort();
                         info!("Aborted task puller fiber");
-                        let exit = task_pull_fiber.await;
+                        let exit = fiber.await;
                         info!("task puller exited: {:?}", exit);
                     })
                 },
                 "task puller".to_string(),
             )
             .await;
+    }
+
+    async fn register(
+        client: &Arc<Mutex<MasterClient<Channel>>>,
+        config: &WorkerConfig,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let files: Vec<(usize, PathBuf)> = config.list_files_in_directory().await?;
+
+        client
+            .lock()
+            .await
+            .register_worker(tonic::Request::new(grpc::RegisterWorkerRequest {
+                locally_stored_chunks: files.iter().map(|(id, _)| *id as u32).collect(),
+            }))
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn new(config: WorkerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        info!("Starting worker with config: {:?}", config);
+
+        let client = Arc::new(Mutex::new(Self::make_client(&config).await?));
+
+        // Register this worker with the master
+        Self::register(&client, &config).await?;
+
+        let shutdown_manager = ShutdownManager::new();
+
+        let error_tracker = Arc::new(RwLock::new(ErrorTracker::default()));
+
+        Self::start_heartbeat_fiber(
+            client.clone(),
+            config.heartbeat_interval,
+            config.max_error_tolerance,
+            error_tracker.clone(),
+            shutdown_manager.shutdown.clone(),
+        )
+        .await;
+
+        Self::start_task_puller_fiber(
+            client.clone(),
+            config.max_error_tolerance,
+            error_tracker.clone(),
+            shutdown_manager.shutdown.clone(),
+        )
+        .await;
 
         Ok(WorkerImpl {
             client,
             config,
-            shutdown: shutdown_receiver,
-            accumulated_errors,
+            shutdown: shutdown_manager,
+            error_tracker,
         })
     }
 
     pub async fn await_shutdown(self) -> ShutdownReason {
-        self.shutdown.await.expect("Failed to await shutdown")
+        self.shutdown
+            .await_shutdown()
+            .await
+            .expect("Failed to await shutdown")
     }
 }
 

@@ -1,5 +1,4 @@
 use config::MasterConfig;
-use dfs::DFS;
 use map_reduce_core::grpc;
 use map_reduce_core::*;
 use master::MasterImpl;
