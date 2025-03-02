@@ -18,30 +18,30 @@ mod task;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = MasterConfig {
-        num_workers: 3,
-        max_heartbeat_delay: Duration::from_secs(30),
-        cleanup_interval: Duration::from_secs(10),
-        address: Address("0.0.0.0:50051".parse()?),
-    };
+  let config = MasterConfig {
+    num_workers: 3,
+    max_heartbeat_delay: Duration::from_secs(30),
+    cleanup_interval: Duration::from_secs(10),
+    address: Address("0.0.0.0:50051".parse()?),
+  };
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::INFO)
-        .finish();
+  let subscriber = FmtSubscriber::builder()
+    .with_max_level(tracing::Level::INFO)
+    .finish();
 
-    tracing::subscriber::set_global_default(subscriber)?;
+  tracing::subscriber::set_global_default(subscriber)?;
 
-    let dfs = dfs::LocalFileSystem::new("input/dfs");
+  let dfs = dfs::LocalFileSystem::new("input/dfs");
 
-    let address = config.address.clone();
+  let address = config.address.clone();
 
-    let master = MasterImpl::new(config, dfs).await;
+  let master = MasterImpl::new(config, dfs).await;
 
-    info!("Starting master server on {:?}", address);
+  info!("Starting master server on {:?}", address);
 
-    Server::builder()
-        .add_service(MasterServer::new(master))
-        .serve(address.0)
-        .await?;
-    Ok(())
+  Server::builder()
+    .add_service(MasterServer::new(master))
+    .serve(address.0)
+    .await?;
+  Ok(())
 }
