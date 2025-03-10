@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 use map_reduce_core::grpc::{self, master_client::MasterClient};
 use tokio::sync::{Mutex, RwLock};
@@ -7,6 +7,7 @@ use tracing::info;
 
 use crate::{
   error_tracker::ErrorTracker,
+  file_system::{FileSystem, LocalFileSystem},
   heartbeat::start_heartbeat_fiber,
   shutdown::{shutdown_manager::ShutdownManager, shutdown_reason::ShutdownReason},
   task_puller::start_task_puller_fiber,
@@ -31,15 +32,13 @@ impl WorkerImpl {
 
   async fn register(
     client: &Arc<Mutex<MasterClient<Channel>>>,
-    config: &WorkerConfig,
+    file_system: &LocalFileSystem,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    let files = config.list_files_in_directory().await?;
-
     client
       .lock()
       .await
       .register_worker(tonic::Request::new(grpc::RegisterWorkerRequest {
-        locally_stored_chunks: files.iter().map(|(id, _)| *id as u32).collect(),
+        file_system_information: Some(file_system.file_system_information().await?),
       }))
       .await?;
 
@@ -50,15 +49,20 @@ impl WorkerImpl {
     info!("Starting worker with config: {:?}", config);
 
     let client = Arc::new(Mutex::new(Self::make_client(&config).await?));
+    let file_system = Arc::new(LocalFileSystem::new(
+      &config.input_directory,
+      &config.output_directory,
+    ));
 
     // Register this worker with the master
-    Self::register(&client, &config).await?;
+    Self::register(&client, file_system.as_ref()).await?;
 
     let shutdown_manager = ShutdownManager::new();
 
     let error_tracker = Arc::new(RwLock::new(ErrorTracker::default()));
 
     start_heartbeat_fiber(
+      file_system,
       client.clone(),
       config.heartbeat_interval,
       config.max_error_tolerance,

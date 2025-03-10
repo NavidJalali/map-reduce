@@ -10,10 +10,12 @@ use tracing::{error, info};
 
 use crate::{
   error_tracker::ErrorTracker,
+  file_system::FileSystem,
   shutdown::{shutdown_manager::Shutdown, shutdown_reason::ShutdownReason},
 };
 
-pub async fn start_heartbeat_fiber(
+pub async fn start_heartbeat_fiber<FS: FileSystem + Send + Sync + 'static>(
+  file_system: Arc<FS>,
   client: Arc<Mutex<MasterClient<Channel>>>,
   heartbeat_interval: Duration,
   max_error_tolerance: usize,
@@ -24,10 +26,18 @@ pub async fn start_heartbeat_fiber(
   let fiber = tokio::spawn(async move {
     loop {
       sleep(heartbeat_interval).await;
+
+      let fs_info = file_system
+        .file_system_information()
+        .await
+        .expect("Failed to get file system information");
+
       let result = client
         .lock()
         .await
-        .send_heartbeat(tonic::Request::new(grpc::SendHeartbeatRequest {}))
+        .send_heartbeat(tonic::Request::new(grpc::SendHeartbeatRequest {
+          file_system_information: Some(fs_info),
+        }))
         .await;
 
       match result {

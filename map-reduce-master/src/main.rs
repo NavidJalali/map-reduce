@@ -13,6 +13,7 @@ mod config;
 mod dfs;
 mod input_file_chunk;
 mod master;
+mod output_file_chunk;
 mod state;
 mod task;
 

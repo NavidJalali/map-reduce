@@ -5,6 +5,7 @@ use worker::WorkerImpl;
 use worker_config::WorkerConfig;
 
 mod error_tracker;
+mod file_system;
 mod heartbeat;
 mod shutdown;
 mod task_puller;
@@ -17,6 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     master_address: Address("0.0.0.0:50051".parse()?),
     heartbeat_interval: Duration::from_secs(3).into(),
     input_directory: std::env::var("INPUT_DIRECTORY").expect("INPUT_DIRECTORY not set"),
+    output_directory: std::env::var("OUTPUT_DIRECTORY").expect("OUTPUT_DIRECTORY not set"),
     max_error_tolerance: 3,
   };
 

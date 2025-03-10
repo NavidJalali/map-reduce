@@ -2,6 +2,7 @@ use crate::{
   config::MasterConfig,
   dfs::DFS,
   input_file_chunk::InputFileChunk,
+  output_file_chunk::OutputFileChunk,
   state::{State, WorkerInfo},
 };
 use map_reduce_core::{grpc::master_server::Master, *};
@@ -73,21 +74,32 @@ impl<FileSystem: DFS + Send + Sync + 'static> Master for MasterImpl<FileSystem> 
       request.remote_addr()
     );
     let address = Address(request.remote_addr().unwrap());
-    let locally_stored_chunks = request
-      .into_inner()
-      .locally_stored_chunks
+    let register_request = request.into_inner();
+
+    let fs_info = register_request
+      .file_system_information
+      .ok_or(Status::invalid_argument("Missing file system information"))?;
+
+    let input = fs_info
+      .input_files
       .iter()
-      .map(|&id| InputFileChunk { id })
+      .map(|f| InputFileChunk { id: f.id })
       .collect::<Vec<_>>();
 
-    let locally_stored_chunks = locally_stored_chunks.as_slice();
-
-    let locally_stored_chunks = Arc::from(locally_stored_chunks);
+    let output = fs_info
+      .output_files
+      .iter()
+      .map(|f| OutputFileChunk {
+        id: f.id,
+        partition: f.partition,
+      })
+      .collect::<Vec<_>>();
 
     let info = WorkerInfo {
       address: address,
       last_heartbeat: SystemTime::now(),
-      locally_stored_chunks: locally_stored_chunks,
+      input_files: Arc::from(input),
+      output_files: Arc::from(output),
     };
 
     let mut state = self.state.write().await;
@@ -194,11 +206,7 @@ impl<FileSystem: DFS + Send + Sync + 'static> Master for MasterImpl<FileSystem> 
                     seconds: duration.as_secs() as i64,
                     nanos: duration.subsec_nanos() as i32,
                   }),
-                  locally_stored_chunks: info
-                    .locally_stored_chunks
-                    .iter()
-                    .map(|chunk| chunk.id)
-                    .collect::<Vec<_>>(),
+                  file_system_information: Some(info.file_system_information()),
                 },
               )
             })
