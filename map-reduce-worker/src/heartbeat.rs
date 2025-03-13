@@ -85,7 +85,7 @@ pub async fn start_heartbeat_fiber<FS: FileSystem + Send + Sync + 'static>(
           info!("heartbeat exited: {:?}", exit);
         })
       },
-      "heartbeat".to_string(),
+      "heartbeat",
     )
     .await;
 }

@@ -131,7 +131,7 @@ pub async fn start_task_puller_fiber(
           info!("task puller exited: {:?}", exit);
         })
       },
-      "task puller".to_string(),
+      "task puller",
     )
     .await;
 }

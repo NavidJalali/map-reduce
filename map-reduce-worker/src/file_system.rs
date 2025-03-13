@@ -1,6 +1,12 @@
-use std::{future::Future, sync::Arc};
+use std::{future::Future, io, path::Path, pin::Pin, sync::Arc};
 
 use map_reduce_core::grpc::{FileSystemInformation, InputFileId, OutputFileId};
+use tokio::{
+  fs::File,
+  io::{AsyncSeekExt, BufReader},
+};
+use tokio_stream::Stream;
+use tokio_util::io::ReaderStream;
 
 pub struct InputFileChunk {
   pub id: u32,
@@ -55,17 +61,22 @@ impl OutputFileChunk {
 }
 
 pub trait FileSystem {
-  fn list_input_files(
-    &self,
-  ) -> impl Future<Output = Result<Vec<InputFileChunk>, std::io::Error>> + Send;
+  fn list_input_files(&self) -> impl Future<Output = io::Result<Vec<InputFileChunk>>> + Send;
 
-  fn list_output_files(
-    &self,
-  ) -> impl Future<Output = Result<Vec<OutputFileChunk>, std::io::Error>> + Send;
+  fn list_output_files(&self) -> impl Future<Output = io::Result<Vec<OutputFileChunk>>> + Send;
 
   fn file_system_information(
     &self,
-  ) -> impl Future<Output = Result<FileSystemInformation, std::io::Error>> + Send;
+  ) -> impl Future<Output = io::Result<FileSystemInformation>> + Send;
+
+  fn read_input_file(
+    &self,
+    input_file_id: InputFileId,
+    offset: usize,
+  ) -> impl Future<
+    Output = tokio::io::Result<Pin<Box<dyn Stream<Item = tokio::io::Result<bytes::Bytes>> + Send>>>,
+  > + Send;
+  
 }
 
 pub struct LocalFileSystem {
@@ -79,6 +90,19 @@ impl LocalFileSystem {
       input_directory: Arc::from(input_directory),
       output_directory: Arc::from(output_directory),
     }
+  }
+
+  pub async fn read_input_file<P: AsRef<Path>>(
+    file_path: P,
+    offset: u64,
+  ) -> tokio::io::Result<impl Stream<Item = tokio::io::Result<bytes::Bytes>>> {
+    let mut file = File::open(file_path).await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+
+    let reader = BufReader::new(file);
+    let stream = ReaderStream::new(reader);
+
+    Ok(stream)
   }
 }
 
@@ -137,6 +161,17 @@ impl FileSystem for LocalFileSystem {
     };
 
     Ok(result)
+  }
+
+  async fn read_input_file(
+    &self,
+    input_file_id: InputFileId,
+    offset: usize,
+  ) -> tokio::io::Result<Pin<Box<dyn Stream<Item = tokio::io::Result<bytes::Bytes>> + Send>>> {
+    let file_path = format!("{}/chunk-{}.txt", self.input_directory, input_file_id.id);
+    let offset = offset as u64;
+    let stream = LocalFileSystem::read_input_file(file_path, offset).await?;
+    Ok(Box::pin(stream))
   }
 }
 

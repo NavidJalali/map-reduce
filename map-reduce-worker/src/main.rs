@@ -1,8 +1,10 @@
 use map_reduce_core::Address;
 use tokio::time::Duration;
+use tonic::transport::Server;
 use tracing::info;
 use worker::WorkerImpl;
 use worker_config::WorkerConfig;
+use worker_server::WorkerServerImpl;
 
 mod error_tracker;
 mod file_system;
@@ -11,6 +13,7 @@ mod shutdown;
 mod task_puller;
 mod worker;
 mod worker_config;
+mod worker_server;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

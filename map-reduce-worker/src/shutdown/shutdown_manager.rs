@@ -34,11 +34,15 @@ pub struct Shutdown<A> {
 }
 
 impl<A> Shutdown<A> {
-  pub async fn register_shutdown_task<F>(&self, task: F, description: String)
+  pub async fn register_shutdown_task<F>(&self, task: F, description: &str)
   where
     F: FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
   {
-    self.tasks.lock().await.push((description, Box::new(task)));
+    self
+      .tasks
+      .lock()
+      .await
+      .push((description.into(), Box::new(task)));
   }
 
   pub async fn trigger(&self, value: A) {
